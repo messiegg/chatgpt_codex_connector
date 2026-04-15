@@ -15,5 +15,6 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 data/demo_workspace/mcp_runs/
+data/demo_workspace/manual_test/
 data/demo_workspace/smoke_runs/
 data/demo_workspace/*.txt

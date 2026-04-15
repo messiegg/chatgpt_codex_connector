@@ -25,7 +25,8 @@ SESSION_FILENAME = "dev_session.json"
 SERVER_LOG_FILENAME = "dev_mcp_server.log"
 TUNNEL_LOG_FILENAME = "dev_tunnel.log"
 HEALTHCHECK_TIMEOUT_SECONDS = 20.0
-TUNNEL_DISCOVERY_TIMEOUT_SECONDS = 5.0
+TUNNEL_DISCOVERY_INITIAL_TIMEOUT_SECONDS = 15.0
+TUNNEL_DISCOVERY_REFRESH_INTERVAL_SECONDS = 2.0
 SUPERVISOR_POLL_INTERVAL_SECONDS = 0.2
 PROCESS_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
@@ -57,9 +58,9 @@ def _public_mcp_url(settings: BridgeSettings, public_base_url: str | None) -> st
     return f"{public_base_url.rstrip('/')}{settings.mcp_path}"
 
 
-def _http_get_json(url: str) -> dict[str, object] | None:
+def _http_get_json(url: str, *, timeout_seconds: float = 2.0) -> dict[str, object] | None:
     try:
-        with request.urlopen(url, timeout=2) as response:
+        with request.urlopen(url, timeout=timeout_seconds) as response:
             payload = response.read().decode("utf-8")
     except (error.URLError, error.HTTPError, TimeoutError):
         return None
@@ -107,15 +108,19 @@ def _resolve_tunnel_command(settings: BridgeSettings) -> list[str] | None:
     return None
 
 
-def _discover_ngrok_public_url(*, should_stop: Callable[[], bool]) -> str | None:
-    deadline = time.monotonic() + TUNNEL_DISCOVERY_TIMEOUT_SECONDS
+def _discover_ngrok_public_url(
+    *,
+    should_stop: Callable[[], bool],
+    timeout_seconds: float,
+) -> str | None:
+    deadline = time.monotonic() + timeout_seconds
     api_url = "http://127.0.0.1:4040/api/tunnels"
 
     while time.monotonic() < deadline:
         if should_stop():
             return None
 
-        payload = _http_get_json(api_url)
+        payload = _http_get_json(api_url, timeout_seconds=min(timeout_seconds, 2.0))
         tunnels = payload.get("tunnels") if payload else None
         if isinstance(tunnels, list):
             https_urls = [
@@ -147,6 +152,8 @@ class DevSupervisor:
         self._shutdown_requested = Event()
         self._shutdown_reason: str | None = None
         self._cleanup_done = False
+        self._tunnel_supports_auto_discovery = False
+        self._last_tunnel_discovery_attempt_at = 0.0
 
     def run(self) -> int:
         self.settings.ensure_runtime_dirs()
@@ -170,7 +177,13 @@ class DevSupervisor:
                 self.tunnel_log_path,
                 label="tunnel",
             )
-            self.public_base_url = _discover_ngrok_public_url(should_stop=self.should_stop)
+            self._tunnel_supports_auto_discovery = Path(tunnel_command[0]).name == "ngrok"
+            if self._tunnel_supports_auto_discovery:
+                self.public_base_url = _discover_ngrok_public_url(
+                    should_stop=self.should_stop,
+                    timeout_seconds=TUNNEL_DISCOVERY_INITIAL_TIMEOUT_SECONDS,
+                )
+                self._last_tunnel_discovery_attempt_at = time.monotonic()
         else:
             logger.info("public tunnel not enabled")
 
@@ -264,6 +277,8 @@ class DevSupervisor:
                 if tunnel_return_code is not None:
                     logger.warning("tunnel exited with code %s", tunnel_return_code)
                     self.tunnel_process = None
+                else:
+                    self._refresh_public_base_url_if_needed()
 
             time.sleep(SUPERVISOR_POLL_INTERVAL_SECONDS)
 
@@ -320,6 +335,31 @@ class DevSupervisor:
             json.dumps(payload, ensure_ascii=True, indent=2) + "\n",
             encoding="utf-8",
         )
+
+    def _refresh_public_base_url_if_needed(self) -> None:
+        if not self._tunnel_supports_auto_discovery:
+            return
+        if self.public_base_url:
+            return
+
+        now = time.monotonic()
+        if now - self._last_tunnel_discovery_attempt_at < TUNNEL_DISCOVERY_REFRESH_INTERVAL_SECONDS:
+            return
+
+        self._last_tunnel_discovery_attempt_at = now
+        discovered_public_base_url = _discover_ngrok_public_url(
+            should_stop=self.should_stop,
+            timeout_seconds=0.5,
+        )
+        if not discovered_public_base_url:
+            return
+
+        self.public_base_url = discovered_public_base_url
+        self._write_session_file()
+        public_mcp_url = _public_mcp_url(self.settings, self.public_base_url)
+        if public_mcp_url:
+            print(f"public MCP URL discovered: {public_mcp_url}")
+            print(f"ChatGPT Developer Mode address: {public_mcp_url}")
 
     def _print_runtime_summary(self) -> None:
         public_mcp_url = _public_mcp_url(self.settings, self.public_base_url)

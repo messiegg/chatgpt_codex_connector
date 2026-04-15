@@ -156,6 +156,11 @@ python3.11 scripts/dev_up.py
 5. 打印本地地址、可用的公网地址、日志路径和 artifacts 路径
 6. 写入 `logs/dev_session.json`
 
+补充说明：
+
+- 如果 `ngrok` 启动比 MCP server 慢，`dev_up.py` 现在会在启动后继续补发现公网地址
+- 一旦拿到公网地址，会自动更新 `logs/dev_session.json`，并在终端补打印 `public MCP URL discovered: ...`
+
 配套关闭脚本：
 
 ```bash
@@ -335,6 +340,7 @@ widget 展示字段：
 - 结构化 JSON 仍保留在 `structuredContent`
 - 数据 tool 与 widget 绑定解耦，更接近 Apps SDK 推荐模式
 - widget 只是增强层；即使 UI 未渲染，数据 tool 的 JSON 结果仍然可用
+- widget 页面会先显示等待态，再监听父窗口的 `ui/notifications/tool-result` 消息并重渲染
 
 推荐调用链：
 

@@ -75,6 +75,8 @@ widget 展示字段：
 
 这样更符合 Apps SDK 推荐模式：把业务数据获取和 UI 渲染解耦。
 
+widget 页面在初始空载时会显示等待态，并监听父窗口发来的 `ui/notifications/tool-result` 消息；收到 `structuredContent` 后再重渲染。
+
 ## `create_job`
 
 名称：

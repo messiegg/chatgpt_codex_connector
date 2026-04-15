@@ -202,6 +202,8 @@
       (function () {
         var root = document.getElementById("result-widget-root");
         var EMPTY = "(empty)";
+        var WAITING_MESSAGE = "Waiting for result payload...";
+        var INVALID_PAYLOAD_MESSAGE = "Result widget payload not available.";
 
         function escapeHtml(value) {
           return String(value)
@@ -216,20 +218,24 @@
           return value !== null && typeof value === "object" && !Array.isArray(value);
         }
 
+        function hasOwn(source, key) {
+          return Object.prototype.hasOwnProperty.call(source, key);
+        }
+
         function readHostPayload() {
           var host = window.openai || {};
           var meta = isObject(host.toolResponseMetadata) ? host.toolResponseMetadata : {};
-          var payload = meta.resultWidgetPayload;
-          if (isObject(payload)) {
+          var payload = coercePayload(meta.resultWidgetPayload);
+          if (payload) {
             return payload;
           }
 
-          var toolOutput = host.toolOutput;
-          if (isObject(toolOutput)) {
-            return normalizePayload(toolOutput);
+          payload = coercePayload(host.toolOutput);
+          if (payload) {
+            return payload;
           }
 
-          return window.__RESULT_WIDGET_PAYLOAD__ || null;
+          return coercePayload(window.__RESULT_WIDGET_PAYLOAD__);
         }
 
         function normalizePayload(source) {
@@ -253,6 +259,71 @@
             started_at: valueOrNull(source.started_at),
             finished_at: valueOrNull(source.finished_at),
           };
+        }
+
+        function coercePayload(source) {
+          if (!isObject(source)) {
+            return null;
+          }
+
+          if (isWidgetPayloadShape(source)) {
+            return normalizePayload(source);
+          }
+
+          if (isObject(source.result) && isWidgetPayloadShape(source.result)) {
+            return normalizePayload(source.result);
+          }
+
+          return null;
+        }
+
+        function isWidgetPayloadShape(source) {
+          return (
+            hasOwn(source, "job_id") &&
+            hasOwn(source, "status") &&
+            hasOwn(source, "summary") &&
+            hasOwn(source, "stdout_tail") &&
+            hasOwn(source, "stderr_tail") &&
+            hasOwn(source, "work_dir") &&
+            hasOwn(source, "artifact_dir") &&
+            hasOwn(source, "artifact_names")
+          );
+        }
+
+        function parseJsonRpcMessage(value) {
+          if (typeof value === "string") {
+            try {
+              value = JSON.parse(value);
+            } catch (error) {
+              return null;
+            }
+          }
+
+          if (!isObject(value) || value.jsonrpc !== "2.0") {
+            return null;
+          }
+
+          return value;
+        }
+
+        function extractPayloadFromToolResultNotification(message) {
+          if (!isObject(message) || message.method !== "ui/notifications/tool-result") {
+            return { matched: false, payload: null };
+          }
+
+          var params = isObject(message.params) ? message.params : {};
+          var payload = coercePayload(params.structuredContent);
+          if (payload) {
+            return { matched: true, payload: payload };
+          }
+
+          var meta = isObject(params._meta) ? params._meta : {};
+          payload = coercePayload(meta.resultWidgetPayload);
+          if (payload) {
+            return { matched: true, payload: payload };
+          }
+
+          return { matched: true, payload: null };
         }
 
         function valueOrNull(value) {
@@ -321,12 +392,6 @@
         }
 
         function render(payload) {
-          if (!isObject(payload)) {
-            root.innerHTML =
-              '<section class="card"><strong class="error">Result widget payload not available.</strong></section>';
-            return;
-          }
-
           var resolvedJobBlock = "";
           if (payload.resolved_job_id && payload.resolved_job_id !== payload.job_id) {
             resolvedJobBlock =
@@ -380,7 +445,47 @@
             "</section>";
         }
 
-        render(readHostPayload());
+        function renderWaiting() {
+          root.innerHTML =
+            '<section class="card"><strong class="empty">' + escapeHtml(WAITING_MESSAGE) + "</strong></section>";
+        }
+
+        function renderError(message) {
+          root.innerHTML =
+            '<section class="card"><strong class="error">' + escapeHtml(message) + "</strong></section>";
+        }
+
+        function handleMessage(event) {
+          if (event.source !== window.parent) {
+            return;
+          }
+
+          var message = parseJsonRpcMessage(event.data);
+          if (!message) {
+            return;
+          }
+
+          var extracted = extractPayloadFromToolResultNotification(message);
+          if (!extracted.matched) {
+            return;
+          }
+
+          if (extracted.payload) {
+            render(extracted.payload);
+            return;
+          }
+
+          renderError(INVALID_PAYLOAD_MESSAGE);
+        }
+
+        window.addEventListener("message", handleMessage);
+
+        var initialPayload = readHostPayload();
+        if (initialPayload) {
+          render(initialPayload);
+        } else {
+          renderWaiting();
+        }
       })();
     </script>
   </body>
