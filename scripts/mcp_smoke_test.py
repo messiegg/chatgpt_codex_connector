@@ -18,6 +18,19 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 from local_smoke_test import DEFAULT_PROMPT, build_smoke_work_dir, print_section
+from bridge_server.schemas import (
+    GetLatestResultResponse,
+    GetResultResponse,
+    ResultWidgetPayload,
+    RunCodexTaskResponse,
+)
+from mcp_server.result_widget import (
+    RESULT_WIDGET_MIME_TYPE,
+    RESULT_WIDGET_PAYLOAD_META_KEY,
+    RESULT_WIDGET_URI,
+    build_result_text_content,
+    build_result_widget_payload,
+)
 
 
 DEFAULT_MCP_URL = "http://127.0.0.1:8001/mcp"
@@ -30,7 +43,14 @@ REQUIRED_TOOLS = {
     "get_artifact",
     "wait_for_job",
     "run_codex_task",
+    "render_result_widget",
 }
+DATA_TOOLS = {
+    "run_codex_task": RunCodexTaskResponse,
+    "get_result": GetResultResponse,
+    "get_latest_result": GetLatestResultResponse,
+}
+RENDER_TOOL_NAME = "render_result_widget"
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,6 +102,107 @@ def _require_success(result: Any, tool_name: str) -> dict[str, Any]:
     return payload
 
 
+def _require_meta(result: Any, tool_name: str) -> dict[str, Any]:
+    payload = getattr(result, "meta", None)
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{tool_name} returned unexpected tool metadata")
+    return payload
+
+
+def _resolve_widget_uri(meta: dict[str, Any] | None) -> str | None:
+    if not isinstance(meta, dict):
+        return None
+
+    output_template = meta.get("openai/outputTemplate")
+    if isinstance(output_template, str) and output_template:
+        return output_template
+
+    ui = meta.get("ui")
+    if isinstance(ui, dict):
+        resource_uri = ui.get("resourceUri")
+        if isinstance(resource_uri, str) and resource_uri:
+            return resource_uri
+    return None
+
+
+def _require_text_output(result: Any, tool_name: str) -> str:
+    texts: list[str] = []
+    for item in getattr(result, "content", []):
+        text = getattr(item, "text", None)
+        if isinstance(text, str):
+            texts.append(text)
+    if not texts:
+        raise RuntimeError(f"{tool_name} returned no text content")
+    return "\n".join(texts)
+
+
+def _assert_no_widget_tool_descriptor_binding(tool: Any) -> None:
+    widget_uri = _resolve_widget_uri(getattr(tool, "meta", None))
+    if widget_uri is not None:
+        raise RuntimeError(
+            f"{tool.name} unexpectedly registered widget metadata: {widget_uri!r}"
+        )
+
+
+def _assert_render_tool_descriptor_binding(tool: Any) -> None:
+    widget_uri = _resolve_widget_uri(getattr(tool, "meta", None))
+    if widget_uri != RESULT_WIDGET_URI:
+        raise RuntimeError(
+            f"{tool.name} registered unexpected widget resource: {widget_uri!r}"
+        )
+
+
+def _assert_no_widget_result_binding(
+    *,
+    tool_name: str,
+    result: Any,
+    payload: dict[str, Any],
+) -> None:
+    meta = getattr(result, "meta", None)
+    widget_uri = _resolve_widget_uri(meta)
+    if widget_uri is not None:
+        raise RuntimeError(
+            f"{tool_name} unexpectedly returned a widget resource: {widget_uri!r}"
+        )
+    if isinstance(meta, dict) and RESULT_WIDGET_PAYLOAD_META_KEY in meta:
+        raise RuntimeError(f"{tool_name} unexpectedly returned {RESULT_WIDGET_PAYLOAD_META_KEY}")
+
+    response_model = DATA_TOOLS[tool_name].model_validate(payload)
+    expected_text = build_result_text_content(build_result_widget_payload(response_model))
+    actual_text = _require_text_output(result, tool_name)
+    if actual_text != expected_text:
+        raise RuntimeError(f"{tool_name} returned unexpected text content")
+
+
+def _assert_render_widget_binding(
+    *,
+    result: Any,
+    expected_payload: dict[str, Any],
+) -> None:
+    meta = _require_meta(result, RENDER_TOOL_NAME)
+    widget_payload = meta.get(RESULT_WIDGET_PAYLOAD_META_KEY)
+    if not isinstance(widget_payload, dict):
+        raise RuntimeError(f"{RENDER_TOOL_NAME} did not include {RESULT_WIDGET_PAYLOAD_META_KEY}")
+
+    actual_payload = _require_success(result, RENDER_TOOL_NAME)
+    if actual_payload != expected_payload:
+        raise RuntimeError(f"{RENDER_TOOL_NAME} returned unexpected structured content")
+    if widget_payload != expected_payload:
+        raise RuntimeError(f"{RENDER_TOOL_NAME} returned a mismatched widget payload")
+
+    rendered_text = _require_text_output(result, RENDER_TOOL_NAME)
+    expected_job_id = expected_payload.get("job_id")
+    if str(expected_job_id) not in rendered_text:
+        raise RuntimeError(f"{RENDER_TOOL_NAME} returned unexpected text content")
+
+
+def _require_widget_resource(resources: list[Any]) -> Any:
+    for resource in resources:
+        if str(getattr(resource, "uri", "")) == RESULT_WIDGET_URI:
+            return resource
+    raise RuntimeError(f"Missing widget resource: {RESULT_WIDGET_URI}")
+
+
 async def run_smoke_test(args: argparse.Namespace) -> int:
     print(f"Connecting to MCP server at {args.mcp_url} ...")
     async with streamablehttp_client(args.mcp_url) as (read, write, _):
@@ -96,6 +217,29 @@ async def run_smoke_test(args: argparse.Namespace) -> int:
             missing_tools = sorted(REQUIRED_TOOLS.difference(tool_names))
             if missing_tools:
                 raise RuntimeError(f"Required MCP tools are missing: {', '.join(missing_tools)}")
+
+            for tool in list_tools_result.tools:
+                if tool.name in DATA_TOOLS:
+                    _assert_no_widget_tool_descriptor_binding(tool)
+                if tool.name == RENDER_TOOL_NAME:
+                    _assert_render_tool_descriptor_binding(tool)
+
+            list_resources_result = await session.list_resources()
+            widget_resource = _require_widget_resource(list_resources_result.resources)
+            if getattr(widget_resource, "mimeType", None) != RESULT_WIDGET_MIME_TYPE:
+                raise RuntimeError(
+                    f"Widget resource mimeType mismatch: {getattr(widget_resource, 'mimeType', None)!r}"
+                )
+
+            read_widget_result = await session.read_resource(RESULT_WIDGET_URI)
+            widget_contents = getattr(read_widget_result, "contents", [])
+            if not widget_contents:
+                raise RuntimeError("Widget resource returned no contents")
+            widget_html = getattr(widget_contents[0], "text", "") or getattr(
+                widget_contents[0], "content", ""
+            )
+            if "result-widget-root" not in widget_html:
+                raise RuntimeError("Widget resource did not return the expected HTML shell")
 
             if args.work_dir:
                 work_dir = Path(args.work_dir).expanduser().resolve()
@@ -114,6 +258,11 @@ async def run_smoke_test(args: argparse.Namespace) -> int:
                 },
             )
             task = _require_success(task_result, "run_codex_task")
+            _assert_no_widget_result_binding(
+                tool_name="run_codex_task",
+                result=task_result,
+                payload=task,
+            )
             job_id = task["job_id"]
 
             print(f"Job: {job_id}")
@@ -151,8 +300,35 @@ async def run_smoke_test(args: argparse.Namespace) -> int:
                 },
             )
             aggregated_result = _require_success(result_result, "get_result")
+            _assert_no_widget_result_binding(
+                tool_name="get_result",
+                result=result_result,
+                payload=aggregated_result,
+            )
             latest_result = await session.call_tool("get_latest_result", {})
             latest_aggregated_result = _require_success(latest_result, "get_latest_result")
+            _assert_no_widget_result_binding(
+                tool_name="get_latest_result",
+                result=latest_result,
+                payload=latest_aggregated_result,
+            )
+
+            for source_tool_name, source_payload in (
+                ("run_codex_task", task),
+                ("get_result", aggregated_result),
+                ("get_latest_result", latest_aggregated_result),
+            ):
+                render_payload = build_result_widget_payload(
+                    DATA_TOOLS[source_tool_name].model_validate(source_payload)
+                ).model_dump(mode="json")
+                render_result = await session.call_tool(
+                    RENDER_TOOL_NAME,
+                    {"result": render_payload},
+                )
+                _assert_render_widget_binding(
+                    result=render_result,
+                    expected_payload=ResultWidgetPayload.model_validate(render_payload).model_dump(mode="json"),
+                )
 
             print_section(
                 "get_result",

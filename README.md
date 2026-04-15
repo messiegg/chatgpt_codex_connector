@@ -24,6 +24,17 @@
 2. MCP 新增 `get_result` / `get_latest_result`
 3. 本地新增 `scripts/open_latest_result.py`
 
+第三阶段先做出了最小可用的只读结果面板；3.5 收尾后，当前采用更接近 Apps SDK 推荐的“数据 tool + render tool”模式：
+
+1. 数据 tool：
+   - `run_codex_task`
+   - `get_result`
+   - `get_latest_result`
+2. 渲染 tool：
+   - `render_result_widget`
+
+数据 tool 继续返回原有结构化 JSON 和文本结果；widget 绑定只放在 `render_result_widget` 上。如果 UI 没有被渲染，数据 tool 的 JSON 结果仍可照常使用。
+
 ## 当前能力
 
 - 已有 REST API：
@@ -49,6 +60,9 @@
     - `get_artifact`
     - `wait_for_job`
     - `run_codex_task`
+    - `render_result_widget`
+  - `run_codex_task` / `get_result` / `get_latest_result` 现在是纯数据 tool
+  - `render_result_widget` 会复用同一个只读结果面板 widget
 - 已有 embedded worker dev 模式：
   - 通过 `BRIDGE_EMBED_WORKER=true` 打开
   - 直接挂在现有 MCP server 启动链路里
@@ -70,6 +84,10 @@
   - FastMCP remote server 启动入口
 - [mcp_server/tools.py](/Users/meseg/shu/codex/gpt_bridge/mcp_server/tools.py)
   - MCP tool 注册与参数校验
+- [mcp_server/result_widget.py](/Users/meseg/shu/codex/gpt_bridge/mcp_server/result_widget.py)
+  - 第三阶段结果面板 resource 注册、统一 payload 组装，以及数据 tool / render tool 响应封装
+- [mcp_server/ui/result_widget.html](/Users/meseg/shu/codex/gpt_bridge/mcp_server/ui/result_widget.html)
+  - 只读结果面板 widget
 - [scripts/local_smoke_test.py](/Users/meseg/shu/codex/gpt_bridge/scripts/local_smoke_test.py)
   - REST 级 smoke test
 - [scripts/mcp_smoke_test.py](/Users/meseg/shu/codex/gpt_bridge/scripts/mcp_smoke_test.py)
@@ -231,10 +249,23 @@ python3.11 scripts/mcp_smoke_test.py \
 
 1. `initialize`
 2. `list_tools`
-3. `run_codex_task`
-4. `get_result(job_id)`
-5. `get_latest_result()`
-6. 校验 `result.json`、`summary`、`stdout_tail`、`stderr_tail`
+3. `list_resources`
+4. `run_codex_task`
+5. `render_result_widget`
+6. `get_result(job_id)`
+7. `render_result_widget`
+8. `get_latest_result()`
+9. `render_result_widget`
+10. 校验数据 tool 无 widget、render tool 有 widget，以及 `result.json`、`summary`、`stdout_tail`、`stderr_tail`
+
+最短本地验证步骤：
+
+```bash
+python -m compileall bridge_server mcp_server worker scripts
+python scripts/dev_up.py
+python scripts/mcp_smoke_test.py --timeout-seconds 180
+python scripts/dev_down.py
+```
 
 ## 第二阶段结果聚合
 
@@ -260,6 +291,56 @@ artifacts/<job_id>/result.json
 - `created_at`
 - `started_at`
 - `finished_at`
+
+## 第三阶段内嵌结果面板
+
+当前结果面板采用“数据 tool + render tool”模式：
+
+- 数据 tool：
+  - `run_codex_task`
+  - `get_result(job_id)`
+  - `get_latest_result()`
+- 渲染 tool：
+  - `render_result_widget(...)`
+
+只有 `render_result_widget` 会绑定 ChatGPT 内嵌 widget；前三个业务 tool 只负责返回聚合结果。
+
+widget 展示字段：
+
+- `status`
+- `job_id`
+- `resolved_job_id`（只有 `get_latest_result()` 且与 `job_id` 不同时才显示）
+- `duration_seconds`
+- `work_dir`
+- `artifact_dir`
+- `artifact_names`
+- `summary`
+- `stdout_tail`
+- `stderr_tail`
+
+统一 widget payload 还会额外保留这些只读字段，方便 UI 或后续兼容：
+
+- `timed_out`
+- `result_file_present`
+- `return_code`
+- `command`
+- `created_at`
+- `started_at`
+- `finished_at`
+
+实现原则：
+
+- 服务端继续是唯一权威来源
+- widget 只消费统一 payload，不自己推断业务状态
+- 结构化 JSON 仍保留在 `structuredContent`
+- 数据 tool 与 widget 绑定解耦，更接近 Apps SDK 推荐模式
+- widget 只是增强层；即使 UI 未渲染，数据 tool 的 JSON 结果仍然可用
+
+推荐调用链：
+
+1. 先调用 `run_codex_task(...)`、`get_result(job_id)` 或 `get_latest_result()`
+2. 再把结果转换成统一 payload
+3. 调用 `render_result_widget(...)`
 
 ## 聚合结果 MCP tools
 
@@ -290,6 +371,7 @@ artifacts/<job_id>/result.json
 
 - 优先读取 `result.json`
 - 如果 `result.json` 不存在或损坏，就即时聚合并回退返回
+- 不直接绑定 widget；需要再把结果交给 `render_result_widget(...)`
 
 ### `get_latest_result()`
 
@@ -298,6 +380,7 @@ artifacts/<job_id>/result.json
 返回字段与 `get_result(job_id)` 基本一致，另外还会包含：
 
 - `resolved_job_id`
+- 不直接绑定 widget；需要再把结果交给 `render_result_widget(...)`
 
 ## 高层 MCP tool：`run_codex_task`
 
@@ -334,6 +417,29 @@ run_codex_task(prompt, work_dir=None, timeout_seconds=120, poll_interval=2.0)
 - `artifact_names` 直接列出 artifact 目录下文件名并排序
 - `command` / `duration_seconds` 优先从 `metadata.json` 聚合，拿不到时再回填 job 信息
 - 超时不会抛 MCP tool error，而是返回结构化结果并把 `timed_out=true`
+- 不直接绑定 widget；需要再把结果交给 `render_result_widget(...)`
+
+## 渲染 tool：`render_result_widget`
+
+这个 tool 只负责渲染 widget，不做业务查询。
+
+输入：
+
+- 统一结果 payload（与 `ResultWidgetPayload` 兼容）
+
+输出：
+
+- `structuredContent` 直接返回统一 payload
+- `content` 返回一段简短文本说明
+- tool descriptor 上带同一个 `RESULT_WIDGET_URI` 绑定
+- tool result `_meta` 继续带 `resultWidgetPayload`
+
+推荐用途：
+
+1. 先拿聚合结果
+2. 再渲染 widget
+
+这样比“业务 tool 直接绑 widget”更接近 Apps SDK 推荐模式。
 
 最短示例：
 
@@ -360,6 +466,14 @@ python3.11 scripts/dev_up.py
 ```text
 run_codex_task(...)
 ```
+
+3. 再调用：
+
+```text
+render_result_widget(...)
+```
+
+如果是在 ChatGPT Developer Mode 里联调，应该是“先拿数据，再渲染 widget”，而不是让业务 tool 直接带 widget。
 
 3. 本地查看最新结果：
 
@@ -473,7 +587,7 @@ codex exec --skip-git-repo-check --color never --sandbox workspace-write -C <wor
 - 当前没有鉴权，不适合暴露到不可信网络
 - 当前是单 worker、本地 PoC
 - 当前没有 OAuth
-- 当前没有 widget
+- 当前 widget 只做单个 job 的只读展示，不做复杂交互、轮询或历史列表
 - 当前不是生产级任务系统
 
 更多 MCP tool 细节见 [MCP_TOOLS.md](/Users/meseg/shu/codex/gpt_bridge/MCP_TOOLS.md)。

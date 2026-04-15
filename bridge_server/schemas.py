@@ -56,6 +56,26 @@ class AggregatedJobResult(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class ResultWidgetPayload(BaseModel):
+    job_id: str
+    status: str
+    timed_out: bool | None = None
+    result_file_present: bool | None = None
+    resolved_job_id: str | None = None
+    summary: str
+    stdout_tail: str
+    stderr_tail: str
+    work_dir: str
+    artifact_dir: str
+    artifact_names: list[str]
+    return_code: int | None = None
+    command: str | None = None
+    duration_seconds: float | None = None
+    created_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
 class RunCodexTaskResponse(AggregatedJobResult):
     timed_out: bool
 

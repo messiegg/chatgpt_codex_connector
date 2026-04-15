@@ -19,9 +19,15 @@ from bridge_server.schemas import (
     GetResultResponse,
     JobResponse,
     ListJobsResponse,
+    ResultWidgetPayload,
     RunCodexTaskResponse,
 )
 from bridge_server.service import JobService
+from mcp_server.result_widget import (
+    RESULT_WIDGET_TOOL_META,
+    build_data_result_tool_response,
+    build_render_result_widget_response,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -237,9 +243,10 @@ def register_tools(mcp: FastMCP, service: JobService) -> None:
                 timed_out = job.status not in TERMINAL_JOB_STATUSES
 
             aggregated_result = build_aggregated_job_result(job, timed_out=timed_out)
-            return RunCodexTaskResponse.model_validate(
+            response = RunCodexTaskResponse.model_validate(
                 aggregated_result.model_dump(mode="python")
             )
+            return build_data_result_tool_response(response)  # type: ignore[return-value]
         except HTTPException as exc:
             _handle_http_exception(exc)
         except ToolError:
@@ -262,12 +269,13 @@ def register_tools(mcp: FastMCP, service: JobService) -> None:
                 job,
                 repair_missing_result_file=True,
             )
-            return GetResultResponse.model_validate(
+            response = GetResultResponse.model_validate(
                 {
                     **aggregated_result.model_dump(mode="python"),
                     "result_file_present": result_file_present,
                 }
             )
+            return build_data_result_tool_response(response)  # type: ignore[return-value]
         except HTTPException as exc:
             _handle_http_exception(exc)
         except ToolError:
@@ -288,13 +296,14 @@ def register_tools(mcp: FastMCP, service: JobService) -> None:
                 latest_job,
                 repair_missing_result_file=True,
             )
-            return GetLatestResultResponse.model_validate(
+            response = GetLatestResultResponse.model_validate(
                 {
                     **aggregated_result.model_dump(mode="python"),
                     "result_file_present": result_file_present,
                     "resolved_job_id": latest_job.job_id,
                 }
             )
+            return build_data_result_tool_response(response)  # type: ignore[return-value]
         except HTTPException as exc:
             _handle_http_exception(exc)
         except ToolError:
@@ -302,3 +311,21 @@ def register_tools(mcp: FastMCP, service: JobService) -> None:
         except Exception:
             logger.exception("get_latest_result tool failed")
             _raise_tool_error("Failed to load the latest aggregated result")
+
+    @mcp.tool(
+        name="render_result_widget",
+        description="Render the read-only Codex result widget for a unified result payload.",
+        meta=RESULT_WIDGET_TOOL_META,
+        structured_output=True,
+    )
+    def render_result_widget(result: ResultWidgetPayload) -> ResultWidgetPayload:
+        try:
+            payload = ResultWidgetPayload.model_validate(
+                result.model_dump(mode="python")
+            )
+            return build_render_result_widget_response(payload)  # type: ignore[return-value]
+        except ToolError:
+            raise
+        except Exception:
+            logger.exception("render_result_widget tool failed")
+            _raise_tool_error("Failed to render result widget")

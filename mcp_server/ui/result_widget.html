@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Result Panel</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f6f7f9;
+        --panel: #ffffff;
+        --panel-muted: #eef1f5;
+        --border: #d6dde6;
+        --text: #15202b;
+        --muted: #556371;
+        --success-bg: #def7e5;
+        --success-text: #155a2c;
+        --failure-bg: #fee4e2;
+        --failure-text: #8a1f17;
+        --running-bg: #fff2cc;
+        --running-text: #7f5300;
+        --queued-bg: #e2ecff;
+        --queued-text: #1d4ea3;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f1419;
+          --panel: #161d24;
+          --panel-muted: #1d2630;
+          --border: #2b3947;
+          --text: #e6edf3;
+          --muted: #94a3b0;
+          --success-bg: #163324;
+          --success-text: #91e3ab;
+          --failure-bg: #3a1c1c;
+          --failure-text: #ffb4ab;
+          --running-bg: #3b2d0b;
+          --running-text: #f4d27a;
+          --queued-bg: #1a2b4b;
+          --queued-text: #a9c7ff;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: transparent;
+        color: var(--text);
+        font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .widget {
+        display: grid;
+        gap: 12px;
+        padding: 12px;
+        background: var(--bg);
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 14px;
+      }
+
+      .header {
+        display: grid;
+        gap: 10px;
+      }
+
+      .header-top {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .status-badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 28px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+
+      .status-succeeded {
+        background: var(--success-bg);
+        color: var(--success-text);
+      }
+
+      .status-failed,
+      .status-cancelled {
+        background: var(--failure-bg);
+        color: var(--failure-text);
+      }
+
+      .status-running {
+        background: var(--running-bg);
+        color: var(--running-text);
+      }
+
+      .status-queued {
+        background: var(--queued-bg);
+        color: var(--queued-text);
+      }
+
+      .status-default {
+        background: var(--panel-muted);
+        color: var(--text);
+      }
+
+      .meta-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 10px;
+      }
+
+      .meta-item {
+        min-width: 0;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: var(--panel-muted);
+      }
+
+      .label {
+        display: block;
+        margin-bottom: 4px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .value {
+        display: block;
+        min-width: 0;
+        word-break: break-word;
+      }
+
+      .mono {
+        font-family: var(--mono);
+      }
+
+      .artifacts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .artifact-tag {
+        padding: 5px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--panel-muted);
+        font-family: var(--mono);
+        font-size: 12px;
+        word-break: break-word;
+      }
+
+      details {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--panel-muted);
+      }
+
+      summary {
+        cursor: pointer;
+        padding: 10px 12px;
+        font-weight: 600;
+        user-select: none;
+      }
+
+      pre {
+        margin: 0;
+        padding: 0 12px 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+
+      .empty {
+        color: var(--muted);
+        font-style: italic;
+      }
+
+      .error {
+        color: var(--failure-text);
+      }
+    </style>
+  </head>
+  <body>
+    <main id="result-widget-root" class="widget" aria-live="polite"></main>
+    <script>
+      (function () {
+        var root = document.getElementById("result-widget-root");
+        var EMPTY = "(empty)";
+
+        function escapeHtml(value) {
+          return String(value)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/\"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+        }
+
+        function isObject(value) {
+          return value !== null && typeof value === "object" && !Array.isArray(value);
+        }
+
+        function readHostPayload() {
+          var host = window.openai || {};
+          var meta = isObject(host.toolResponseMetadata) ? host.toolResponseMetadata : {};
+          var payload = meta.resultWidgetPayload;
+          if (isObject(payload)) {
+            return payload;
+          }
+
+          var toolOutput = host.toolOutput;
+          if (isObject(toolOutput)) {
+            return normalizePayload(toolOutput);
+          }
+
+          return window.__RESULT_WIDGET_PAYLOAD__ || null;
+        }
+
+        function normalizePayload(source) {
+          return {
+            job_id: valueOrNull(source.job_id),
+            status: valueOrNull(source.status),
+            timed_out: source.timed_out == null ? null : Boolean(source.timed_out),
+            result_file_present:
+              source.result_file_present == null ? null : Boolean(source.result_file_present),
+            resolved_job_id: valueOrNull(source.resolved_job_id),
+            summary: stringOrEmpty(source.summary),
+            stdout_tail: stringOrEmpty(source.stdout_tail),
+            stderr_tail: stringOrEmpty(source.stderr_tail),
+            work_dir: stringOrEmpty(source.work_dir),
+            artifact_dir: stringOrEmpty(source.artifact_dir),
+            artifact_names: Array.isArray(source.artifact_names) ? source.artifact_names : [],
+            return_code: source.return_code == null ? null : source.return_code,
+            command: valueOrNull(source.command),
+            duration_seconds: source.duration_seconds == null ? null : source.duration_seconds,
+            created_at: valueOrNull(source.created_at),
+            started_at: valueOrNull(source.started_at),
+            finished_at: valueOrNull(source.finished_at),
+          };
+        }
+
+        function valueOrNull(value) {
+          return value == null ? null : String(value);
+        }
+
+        function stringOrEmpty(value) {
+          return value == null ? "" : String(value);
+        }
+
+        function formatValue(value, fallback) {
+          return value == null || value === "" ? fallback : String(value);
+        }
+
+        function formatDuration(value) {
+          if (typeof value !== "number" || !isFinite(value)) {
+            return "—";
+          }
+          return value.toFixed(3).replace(/\.?0+$/, "") + "s";
+        }
+
+        function statusClass(status) {
+          switch ((status || "").toLowerCase()) {
+            case "succeeded":
+              return "status-succeeded";
+            case "failed":
+            case "cancelled":
+              return "status-failed";
+            case "running":
+              return "status-running";
+            case "queued":
+              return "status-queued";
+            default:
+              return "status-default";
+          }
+        }
+
+        function artifactsMarkup(names) {
+          if (!Array.isArray(names) || names.length === 0) {
+            return '<span class="empty">' + EMPTY + "</span>";
+          }
+
+          return names
+            .map(function (name) {
+              return '<span class="artifact-tag">' + escapeHtml(name) + "</span>";
+            })
+            .join("");
+        }
+
+        function sectionMarkup(title, value, open) {
+          var content = value && String(value).length > 0 ? escapeHtml(value) : EMPTY;
+          return (
+            '<details' +
+            (open ? " open" : "") +
+            ">" +
+            "<summary>" +
+            escapeHtml(title) +
+            "</summary>" +
+            "<pre" +
+            (content === EMPTY ? ' class="empty"' : "") +
+            ">" +
+            content +
+            "</pre>" +
+            "</details>"
+          );
+        }
+
+        function render(payload) {
+          if (!isObject(payload)) {
+            root.innerHTML =
+              '<section class="card"><strong class="error">Result widget payload not available.</strong></section>';
+            return;
+          }
+
+          var resolvedJobBlock = "";
+          if (payload.resolved_job_id && payload.resolved_job_id !== payload.job_id) {
+            resolvedJobBlock =
+              '<div class="meta-item"><span class="label">resolved_job_id</span><span class="value mono">' +
+              escapeHtml(payload.resolved_job_id) +
+              "</span></div>";
+          }
+
+          root.innerHTML =
+            '<section class="card header">' +
+            '<div class="header-top">' +
+            '<span class="status-badge ' +
+            statusClass(payload.status) +
+            '">' +
+            escapeHtml(formatValue(payload.status, "unknown")) +
+            "</span>" +
+            "</div>" +
+            '<div class="meta-grid">' +
+            '<div class="meta-item"><span class="label">job_id</span><span class="value mono">' +
+            escapeHtml(formatValue(payload.job_id, "—")) +
+            "</span></div>" +
+            resolvedJobBlock +
+            '<div class="meta-item"><span class="label">return_code</span><span class="value mono">' +
+            escapeHtml(formatValue(payload.return_code, "—")) +
+            "</span></div>" +
+            '<div class="meta-item"><span class="label">duration_seconds</span><span class="value mono">' +
+            escapeHtml(formatDuration(payload.duration_seconds)) +
+            "</span></div>" +
+            "</div>" +
+            "</section>" +
+            '<section class="card">' +
+            '<span class="label">work_dir</span>' +
+            '<span class="value mono">' +
+            escapeHtml(formatValue(payload.work_dir, EMPTY)) +
+            "</span>" +
+            '<span class="label" style="margin-top: 10px;">artifact_dir</span>' +
+            '<span class="value mono">' +
+            escapeHtml(formatValue(payload.artifact_dir, EMPTY)) +
+            "</span>" +
+            "</section>" +
+            '<section class="card">' +
+            '<span class="label">artifact_names</span>' +
+            '<div class="artifacts">' +
+            artifactsMarkup(payload.artifact_names) +
+            "</div>" +
+            "</section>" +
+            '<section class="card">' +
+            sectionMarkup("summary", payload.summary, true) +
+            sectionMarkup("stdout_tail", payload.stdout_tail, false) +
+            sectionMarkup("stderr_tail", payload.stderr_tail, false) +
+            "</section>";
+        }
+
+        render(readHostPayload());
+      })();
+    </script>
+  </body>
+</html>

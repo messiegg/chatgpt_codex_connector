@@ -12,6 +12,7 @@ from starlette.responses import JSONResponse
 
 from bridge_server.config import BridgeSettings
 from bridge_server.service import JobService
+from mcp_server.result_widget import register_result_widget_resource
 from mcp_server.tools import register_tools
 from storage import JobRepository, SQLiteDatabase
 from worker.embedded import EmbeddedWorkerHandle
@@ -90,6 +91,7 @@ def create_mcp_server(settings: BridgeSettings | None = None) -> FastMCP:
         log_level="INFO",
     )
 
+    register_result_widget_resource(mcp)
     register_tools(mcp, service)
 
     @mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
