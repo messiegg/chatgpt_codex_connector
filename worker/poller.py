@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
 
-from bridge_server.config import BridgeSettings
+from bridge_server.config import (
+    WORK_DIR_OUTSIDE_ALLOWED_ROOTS_MESSAGE,
+    BridgeSettings,
+    is_path_within_allowed_roots,
+)
 from bridge_server.results import write_result_file
 from storage import JobRecord, JobRepository, JobStatus
 from worker.codex_runner import run_codex
@@ -86,7 +90,7 @@ class JobPoller:
             self._write_text_file(artifact_dir / "prompt.txt", job.prompt)
 
             if not self._is_work_dir_allowed(job.work_dir):
-                error_message = "work_dir is outside the allowed demo workspace"
+                error_message = WORK_DIR_OUTSIDE_ALLOWED_ROOTS_MESSAGE
                 failure = FailureResult(
                     error_message=error_message,
                     stderr=error_message,
@@ -191,9 +195,7 @@ class JobPoller:
         logger.info("completed job %s with status=%s", job.job_id, updated_job.status.value)
 
     def _is_work_dir_allowed(self, work_dir: str | Path) -> bool:
-        resolved_work_dir = Path(work_dir).expanduser().resolve()
-        allowed_root = self.settings.allowed_work_root.expanduser().resolve()
-        return resolved_work_dir.is_relative_to(allowed_root)
+        return is_path_within_allowed_roots(Path(work_dir), self.settings.allowed_work_roots)
 
     def _write_execution_files(self, *, artifact_dir: Path, stdout: str, stderr: str, summary: str) -> None:
         self._write_text_file(artifact_dir / "stdout.log", stdout)

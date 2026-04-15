@@ -1,13 +1,27 @@
 from __future__ import annotations
 
+import json
 import os
+import re
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 
+WORK_DIR_OUTSIDE_ALLOWED_ROOTS_MESSAGE = "work_dir is outside the allowed work roots"
+
+
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+def _env_raw_value(*names: str) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None:
+            return value
+    return None
 
 
 def _env_value(*names: str) -> str | None:
@@ -23,6 +37,55 @@ def _env_path(default: Path, *names: str) -> Path:
     if not value:
         return default.resolve()
     return Path(value).expanduser().resolve()
+
+
+def _resolve_path(value: str | Path) -> Path:
+    return Path(value).expanduser().resolve()
+
+
+def _parse_allowed_work_roots(
+    default: Path,
+    *,
+    roots_env_names: Sequence[str],
+    root_env_names: Sequence[str],
+) -> tuple[Path, ...]:
+    raw_value = _env_raw_value(*roots_env_names)
+    if raw_value is None or raw_value == "":
+        return (_env_path(default, *root_env_names),)
+
+    stripped_value = raw_value.strip()
+    if stripped_value.startswith("["):
+        try:
+            parsed_value = json.loads(stripped_value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid JSON array for {', '.join(roots_env_names)}"
+            ) from exc
+
+        if not isinstance(parsed_value, list) or any(not isinstance(item, str) for item in parsed_value):
+            raise ValueError(f"{', '.join(roots_env_names)} must be a JSON array of strings")
+        raw_items = parsed_value
+    else:
+        raw_items = re.split(r"[\n,]", stripped_value)
+
+    resolved_roots: list[Path] = []
+    seen_roots: set[Path] = set()
+    for raw_item in raw_items:
+        normalized_item = raw_item.strip()
+        if not normalized_item:
+            continue
+
+        resolved_root = _resolve_path(normalized_item)
+        if resolved_root in seen_roots:
+            continue
+
+        seen_roots.add(resolved_root)
+        resolved_roots.append(resolved_root)
+
+    if not resolved_roots:
+        raise ValueError("allowed_work_roots must contain at least one valid path")
+
+    return tuple(resolved_roots)
 
 
 def _env_str(default: str, *names: str) -> str:
@@ -59,6 +122,14 @@ def _env_bool(default: bool, *names: str) -> bool:
     raise ValueError(f"Invalid boolean value '{value}' for {', '.join(names)}")
 
 
+def is_path_within_allowed_roots(candidate: Path, allowed_roots: Sequence[Path]) -> bool:
+    resolved_candidate = _resolve_path(candidate)
+    for root in allowed_roots:
+        if resolved_candidate == root or resolved_candidate.is_relative_to(root):
+            return True
+    return False
+
+
 @dataclass(slots=True, frozen=True)
 class BridgeSettings:
     database_path: Path
@@ -67,13 +138,28 @@ class BridgeSettings:
     codex_command: str
     worker_poll_interval_seconds: float
     default_work_dir: Path
-    allowed_work_root: Path
+    allowed_work_roots: tuple[Path, ...]
     host: str
     port: int
     mcp_host: str
     mcp_port: int
     mcp_path: str
     embed_worker: bool
+
+    def __post_init__(self) -> None:
+        if not self.allowed_work_roots:
+            raise ValueError("allowed_work_roots must not be empty")
+
+        for root in self.allowed_work_roots:
+            if not root.is_absolute() or root != _resolve_path(root):
+                raise ValueError("allowed_work_roots must contain resolved absolute paths")
+
+        if not is_path_within_allowed_roots(self.default_work_dir, self.allowed_work_roots):
+            raise ValueError("default_work_dir is outside the allowed work roots")
+
+    @property
+    def allowed_work_root(self) -> Path:
+        return self.allowed_work_roots[0]
 
     @classmethod
     def from_env(cls) -> "BridgeSettings":
@@ -117,10 +203,16 @@ class BridgeSettings:
                 "CODEX_BRIDGE_DEFAULT_WORK_DIR",
                 "BRIDGE_DEFAULT_WORK_DIR",
             ),
-            allowed_work_root=_env_path(
+            allowed_work_roots=_parse_allowed_work_roots(
                 root / "data" / "demo_workspace",
-                "CODEX_BRIDGE_ALLOWED_WORK_ROOT",
-                "BRIDGE_ALLOWED_WORK_ROOT",
+                roots_env_names=(
+                    "CODEX_BRIDGE_ALLOWED_WORK_ROOTS",
+                    "BRIDGE_ALLOWED_WORK_ROOTS",
+                ),
+                root_env_names=(
+                    "CODEX_BRIDGE_ALLOWED_WORK_ROOT",
+                    "BRIDGE_ALLOWED_WORK_ROOT",
+                ),
             ),
             host=_env_str(
                 "127.0.0.1",
@@ -155,7 +247,8 @@ class BridgeSettings:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.default_work_dir.mkdir(parents=True, exist_ok=True)
-        self.allowed_work_root.mkdir(parents=True, exist_ok=True)
+        for allowed_work_root in self.allowed_work_roots:
+            allowed_work_root.mkdir(parents=True, exist_ok=True)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -164,7 +257,8 @@ class BridgeSettings:
             "artifacts_dir",
             "logs_dir",
             "default_work_dir",
-            "allowed_work_root",
         ):
             payload[key] = str(payload[key])
+        payload["allowed_work_roots"] = [str(path) for path in self.allowed_work_roots]
+        payload["allowed_work_root"] = str(self.allowed_work_root)
         return payload

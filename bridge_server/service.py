@@ -5,7 +5,11 @@ from uuid import uuid4
 
 from fastapi import HTTPException, status
 
-from bridge_server.config import BridgeSettings
+from bridge_server.config import (
+    WORK_DIR_OUTSIDE_ALLOWED_ROOTS_MESSAGE,
+    BridgeSettings,
+    is_path_within_allowed_roots,
+)
 from bridge_server.schemas import CreateJobRequest, HealthResponse, JobResponse, ListJobsResponse
 from storage import JobRecord, JobRepository, JobStatus
 
@@ -26,8 +30,13 @@ class JobService:
     def create_job(self, request: CreateJobRequest) -> JobResponse:
         job_id = str(uuid4())
         work_dir = Path(request.work_dir or self.settings.default_work_dir).expanduser().resolve()
-        artifact_dir = (self.settings.artifacts_dir / job_id).resolve()
+        if not is_path_within_allowed_roots(work_dir, self.settings.allowed_work_roots):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=WORK_DIR_OUTSIDE_ALLOWED_ROOTS_MESSAGE,
+            )
 
+        artifact_dir = (self.settings.artifacts_dir / job_id).resolve()
         work_dir.mkdir(parents=True, exist_ok=True)
         artifact_dir.mkdir(parents=True, exist_ok=True)
 
