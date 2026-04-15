@@ -21,7 +21,16 @@ from local_smoke_test import DEFAULT_PROMPT, build_smoke_work_dir, print_section
 
 
 DEFAULT_MCP_URL = "http://127.0.0.1:8001/mcp"
-REQUIRED_TOOLS = {"create_job", "get_job", "list_jobs", "get_artifact", "wait_for_job"}
+REQUIRED_TOOLS = {
+    "create_job",
+    "get_job",
+    "get_result",
+    "get_latest_result",
+    "list_jobs",
+    "get_artifact",
+    "wait_for_job",
+    "run_codex_task",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -94,58 +103,115 @@ async def run_smoke_test(args: argparse.Namespace) -> int:
             else:
                 work_dir = build_smoke_work_dir()
 
-            print("Creating demo job via MCP ...")
-            create_result = await session.call_tool(
-                "create_job",
+            print("Running demo job via MCP ...")
+            task_result = await session.call_tool(
+                "run_codex_task",
                 {
                     "prompt": args.prompt,
                     "work_dir": str(work_dir),
-                },
-            )
-            created_job = _require_success(create_result, "create_job")
-            job_id = created_job["job_id"]
-
-            print(f"Created job: {job_id}")
-            print(f"Work dir: {work_dir}")
-            print(f"Artifact dir: {created_job['artifact_dir']}")
-
-            print("Waiting for job via MCP ...")
-            wait_result = await session.call_tool(
-                "wait_for_job",
-                {
-                    "job_id": job_id,
                     "timeout_seconds": args.timeout_seconds,
                     "poll_interval": args.poll_interval,
                 },
             )
-            final_job = _require_success(wait_result, "wait_for_job")
+            task = _require_success(task_result, "run_codex_task")
+            job_id = task["job_id"]
+
+            print(f"Job: {job_id}")
+            print(f"Work dir: {work_dir}")
+            print(f"Artifact dir: {task['artifact_dir']}")
 
             print_section(
                 "Job Result",
                 "\n".join(
                     [
-                        f"job_id: {final_job.get('job_id')}",
-                        f"status: {final_job.get('status')}",
-                        f"return_code: {final_job.get('return_code')}",
-                        f"command: {final_job.get('command')}",
-                        f"work_dir: {final_job.get('work_dir')}",
-                        f"artifact_dir: {final_job.get('artifact_dir')}",
-                        f"summary: {final_job.get('summary')}",
+                        f"job_id: {task.get('job_id')}",
+                        f"status: {task.get('status')}",
+                        f"timed_out: {task.get('timed_out')}",
+                        f"return_code: {task.get('return_code')}",
+                        f"command: {task.get('command')}",
+                        f"duration_seconds: {task.get('duration_seconds')}",
+                        f"work_dir: {task.get('work_dir')}",
+                        f"artifact_dir: {task.get('artifact_dir')}",
+                        f"artifact_names: {task.get('artifact_names')}",
+                        f"summary: {task.get('summary')}",
+                    ]
+                ),
+            )
+            print_section("stdout_tail", task.get("stdout_tail", ""))
+            print_section("stderr_tail", task.get("stderr_tail", ""))
+
+            if task.get("timed_out"):
+                print("\nMCP smoke test failed because run_codex_task timed out.", file=sys.stderr)
+                return 2
+
+            result_result = await session.call_tool(
+                "get_result",
+                {
+                    "job_id": job_id,
+                },
+            )
+            aggregated_result = _require_success(result_result, "get_result")
+            latest_result = await session.call_tool("get_latest_result", {})
+            latest_aggregated_result = _require_success(latest_result, "get_latest_result")
+
+            print_section(
+                "get_result",
+                "\n".join(
+                    [
+                        f"job_id: {aggregated_result.get('job_id')}",
+                        f"status: {aggregated_result.get('status')}",
+                        f"result_file_present: {aggregated_result.get('result_file_present')}",
+                        f"artifact_names: {aggregated_result.get('artifact_names')}",
+                    ]
+                ),
+            )
+            print_section(
+                "get_latest_result",
+                "\n".join(
+                    [
+                        f"resolved_job_id: {latest_aggregated_result.get('resolved_job_id')}",
+                        f"status: {latest_aggregated_result.get('status')}",
+                        f"result_file_present: {latest_aggregated_result.get('result_file_present')}",
+                        f"artifact_names: {latest_aggregated_result.get('artifact_names')}",
                     ]
                 ),
             )
 
-            artifact_result = await session.call_tool(
-                "get_artifact",
-                {
-                    "job_id": job_id,
-                    "name": "summary.txt",
-                },
-            )
-            artifact = _require_success(artifact_result, "get_artifact")
-            print_section("summary.txt", artifact["content"])
+            if aggregated_result.get("job_id") != job_id:
+                print("\nMCP smoke test failed because get_result returned a different job_id.", file=sys.stderr)
+                return 1
 
-            if final_job.get("status") == "succeeded":
+            if latest_aggregated_result.get("resolved_job_id") != job_id:
+                print(
+                    "\nMCP smoke test failed because get_latest_result did not resolve to the newest smoke-test job.",
+                    file=sys.stderr,
+                )
+                return 1
+
+            artifact_names = aggregated_result.get("artifact_names") or []
+            latest_artifact_names = latest_aggregated_result.get("artifact_names") or []
+            if "result.json" not in artifact_names or "result.json" not in latest_artifact_names:
+                print("\nMCP smoke test failed because result.json was not present in aggregated artifacts.", file=sys.stderr)
+                return 1
+
+            for payload_name, payload in (
+                ("get_result", aggregated_result),
+                ("get_latest_result", latest_aggregated_result),
+            ):
+                for field_name in ("summary", "stdout_tail", "stderr_tail"):
+                    if field_name not in payload:
+                        print(
+                            f"\nMCP smoke test failed because {payload_name} did not include {field_name}.",
+                            file=sys.stderr,
+                        )
+                        return 1
+
+            if not aggregated_result.get("result_file_present"):
+                print("get_result used fallback aggregation before reading result.json.")
+            if not latest_aggregated_result.get("result_file_present"):
+                print("get_latest_result used fallback aggregation before reading result.json.")
+
+            if task.get("status") == "succeeded":
                 print("\nMCP smoke test passed.")
                 return 0
 

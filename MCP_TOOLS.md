@@ -6,9 +6,22 @@
 http://127.0.0.1:8001/mcp
 ```
 
+推荐启动方式：
+
+```bash
+python3.11 scripts/dev_up.py
+```
+
+如果你直接跑 MCP server，也可以用：
+
+```bash
+BRIDGE_EMBED_WORKER=true python3.11 scripts/run_mcp_server.py
+```
+
 这一层直接复用：
 
 - [bridge_server/service.py](/Users/meseg/shu/codex/gpt_bridge/bridge_server/service.py)
+- [bridge_server/results.py](/Users/meseg/shu/codex/gpt_bridge/bridge_server/results.py)
 - [storage/repository.py](/Users/meseg/shu/codex/gpt_bridge/storage/repository.py)
 
 它不会反向调用本地 REST API。
@@ -72,6 +85,72 @@ REST 对应关系：
 REST 对应关系：
 
 - `GET /jobs/{job_id}`
+
+## `get_result`
+
+名称：
+
+- `get_result`
+
+输入：
+
+- `job_id: string`
+
+输出：
+
+- `job_id`
+- `status`
+- `summary`
+- `stdout_tail`
+- `stderr_tail`
+- `work_dir`
+- `artifact_dir`
+- `artifact_names`
+- `return_code`
+- `command`
+- `duration_seconds`
+- `created_at`
+- `started_at`
+- `finished_at`
+- `metadata`
+- `result_file_present`
+
+何时使用：
+
+- 希望拿到某个 job 的聚合结果
+- 不想自己再分别读 `summary.txt`、`stdout.log`、`stderr.log`
+
+读取策略：
+
+1. 先查 job 是否存在
+2. 优先读 `artifacts/<job_id>/result.json`
+3. 如果 `result.json` 缺失或损坏，则即时聚合并回退返回
+
+## `get_latest_result`
+
+名称：
+
+- `get_latest_result`
+
+输入：
+
+- 无
+
+输出：
+
+- 与 `get_result(job_id)` 相同
+- 额外包含 `resolved_job_id`
+
+何时使用：
+
+- 希望直接拿到最新一个 job 的聚合结果
+- 本地任务调试后快速回看最后一次结果
+
+最新 job 判定规则：
+
+1. 优先按 `created_at` 最大排序
+2. 若时间相同，再按 `job_id` 排序
+3. 若没有任何 job，则返回 `ToolError`
 
 ## `list_jobs`
 
@@ -165,9 +244,99 @@ REST 对应关系：
 - 没有单独 REST endpoint
 - 它本质上是对 `GET /jobs/{job_id}` 的轮询包装
 
+## `run_codex_task`
+
+名称：
+
+- `run_codex_task`
+
+输入：
+
+- `prompt: string`
+- `work_dir?: string`
+- `timeout_seconds?: integer = 120`
+- `poll_interval?: number = 2.0`
+
+输出：
+
+- `job_id`
+- `status`
+- `timed_out`
+- `summary`
+- `stdout_tail`
+- `stderr_tail`
+- `work_dir`
+- `artifact_dir`
+- `artifact_names`
+- `return_code`
+- `command`
+- `duration_seconds`
+- `created_at`
+- `started_at`
+- `finished_at`
+- `metadata`
+
+何时使用：
+
+- 希望一次 MCP tool call 就拿到聚合后的执行结果
+- ChatGPT 网页端优先应该调用它，而不是自己手动编排三连
+
+内部行为：
+
+1. 创建 job
+2. 轮询直到终态或超时
+3. 聚合 `summary.txt`、`stdout.log`、`stderr.log`、`metadata.json`
+4. 列出 artifact 目录下的文件名并排序返回
+
+## `result.json`
+
+worker 在 job 到达终态后，会额外写：
+
+```text
+artifacts/<job_id>/result.json
+```
+
+这是一个聚合后的最终结果文件。`get_result` / `get_latest_result` 会优先复用它。
+
+## 本地查看脚本
+
+推荐本地查看方式：
+
+```bash
+python3.11 scripts/open_latest_result.py
+```
+
+常见用法：
+
+```bash
+python3.11 scripts/open_latest_result.py --print-json
+python3.11 scripts/open_latest_result.py --work-dir
+python3.11 scripts/open_latest_result.py --job-id <job_id>
+python3.11 scripts/open_latest_result.py --no-open
+```
+
+额外约束：
+
+- `stdout_tail` / `stderr_tail` 取日志尾部摘要，不是头部截断
+- 超时时不会抛 tool error，而是返回结构化结果并把 `timed_out=true`
+- 真正抛 `ToolError` 的场景只保留给非法输入或内部异常
+
+最短示例：
+
+```python
+await session.call_tool(
+    "run_codex_task",
+    {
+        "prompt": "Create exactly one file named demo.txt in the current working directory and summarize the change.",
+        "timeout_seconds": 120,
+    },
+)
+```
+
 ## 当前限制
 
 - 当前 MCP server 是 no-auth、本地开发用途
 - 当前只允许 demo workspace 范围内执行
 - 当前 worker 是本地单进程轮询
+- `BRIDGE_EMBED_WORKER=true` 只是在 MCP server 进程内嵌一个后台 worker，不改变底层 job 模型
 - 当前主要用于验证“ChatGPT -> remote MCP -> 本地 job 系统 -> 本地 Codex”链路

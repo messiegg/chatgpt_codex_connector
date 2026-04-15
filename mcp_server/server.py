@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import signal
+from contextlib import contextmanager
+from types import FrameType
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -11,6 +14,7 @@ from bridge_server.config import BridgeSettings
 from bridge_server.service import JobService
 from mcp_server.tools import register_tools
 from storage import JobRepository, SQLiteDatabase
+from worker.embedded import EmbeddedWorkerHandle
 
 
 logger = logging.getLogger(__name__)
@@ -34,6 +38,38 @@ def build_service(settings: BridgeSettings) -> JobService:
     database = SQLiteDatabase(settings.database_path)
     repository = JobRepository(database)
     return JobService(settings, repository)
+
+
+@contextmanager
+def embedded_worker_runtime(settings: BridgeSettings):
+    worker: EmbeddedWorkerHandle | None = None
+    if settings.embed_worker:
+        worker = EmbeddedWorkerHandle(settings)
+        worker.start()
+
+    try:
+        yield
+    finally:
+        if worker is not None:
+            worker.stop()
+
+
+@contextmanager
+def shutdown_signal_handlers():
+    def handle_shutdown(signum: int, frame: FrameType | None) -> None:
+        del frame
+        raise KeyboardInterrupt(f"received signal {signum}")
+
+    previous_handlers: dict[int, signal.Handlers] = {}
+    for signum in (signal.SIGTERM,):
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, handle_shutdown)
+
+    try:
+        yield
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 def create_mcp_server(settings: BridgeSettings | None = None) -> FastMCP:
@@ -72,9 +108,12 @@ def create_mcp_server(settings: BridgeSettings | None = None) -> FastMCP:
 
 def main() -> None:
     configure_logging()
-    server = create_mcp_server()
+    settings = BridgeSettings.from_env()
+    server = create_mcp_server(settings)
     try:
-        server.run(transport="streamable-http")
+        with shutdown_signal_handlers():
+            with embedded_worker_runtime(settings):
+                server.run(transport="streamable-http")
     except KeyboardInterrupt:
         logger.info("MCP server interrupted, shutting down")
 

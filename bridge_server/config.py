@@ -46,6 +46,19 @@ def _env_float(default: float, *names: str) -> float:
     return float(value)
 
 
+def _env_bool(default: bool, *names: str) -> bool:
+    value = _env_value(*names)
+    if value is None:
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean value '{value}' for {', '.join(names)}")
+
+
 @dataclass(slots=True, frozen=True)
 class BridgeSettings:
     database_path: Path
@@ -60,6 +73,7 @@ class BridgeSettings:
     mcp_host: str
     mcp_port: int
     mcp_path: str
+    embed_worker: bool
 
     @classmethod
     def from_env(cls) -> "BridgeSettings":
@@ -129,6 +143,11 @@ class BridgeSettings:
                 "BRIDGE_MCP_PORT",
             ),
             mcp_path=mcp_path,
+            embed_worker=_env_bool(
+                False,
+                "CODEX_BRIDGE_EMBED_WORKER",
+                "BRIDGE_EMBED_WORKER",
+            ),
         )
 
     def ensure_runtime_dirs(self) -> None:

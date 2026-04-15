@@ -48,6 +48,20 @@ class JobService:
             )
         return _job_to_response(job)
 
+    def get_latest_job(self) -> JobResponse:
+        jobs = self.repository.list_all_jobs()
+        if not jobs:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No jobs found",
+            )
+
+        latest_job = max(
+            jobs,
+            key=lambda job: (job.created_at or "", job.job_id),
+        )
+        return _job_to_response(latest_job)
+
     def list_jobs(
         self,
         *,

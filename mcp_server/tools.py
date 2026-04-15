@@ -9,7 +9,18 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 
-from bridge_server.schemas import CreateJobRequest, JobResponse, ListJobsResponse
+from bridge_server.results import (
+    build_aggregated_job_result,
+    load_or_aggregate_result,
+)
+from bridge_server.schemas import (
+    CreateJobRequest,
+    GetLatestResultResponse,
+    GetResultResponse,
+    JobResponse,
+    ListJobsResponse,
+    RunCodexTaskResponse,
+)
 from bridge_server.service import JobService
 
 
@@ -48,9 +59,9 @@ def _handle_http_exception(exc: HTTPException) -> None:
 
 
 def _require_non_empty(value: str, field_name: str) -> str:
-    if not value:
+    if not value or not value.strip():
         _raise_tool_error(f"{field_name} must not be empty")
-    return value
+    return value.strip()
 
 
 def register_tools(mcp: FastMCP, service: JobService) -> None:
@@ -188,3 +199,106 @@ def register_tools(mcp: FastMCP, service: JobService) -> None:
         except Exception:
             logger.exception("wait_for_job tool failed")
             _raise_tool_error("Failed while waiting for job")
+
+    @mcp.tool(
+        name="run_codex_task",
+        description="Create a job, wait for completion or timeout, and return aggregated execution results.",
+        structured_output=True,
+    )
+    def run_codex_task(
+        prompt: str,
+        work_dir: str | None = None,
+        timeout_seconds: int = 120,
+        poll_interval: float = 2.0,
+    ) -> RunCodexTaskResponse:
+        normalized_prompt = _require_non_empty(prompt, "prompt")
+        if timeout_seconds < 1:
+            _raise_tool_error("timeout_seconds must be greater than or equal to 1")
+        if poll_interval <= 0:
+            _raise_tool_error("poll_interval must be greater than 0")
+
+        deadline = monotonic() + timeout_seconds
+        timed_out = False
+
+        try:
+            payload = CreateJobRequest(prompt=normalized_prompt, work_dir=work_dir)
+            job = service.create_job(payload)
+
+            while job.status not in TERMINAL_JOB_STATUSES:
+                if monotonic() >= deadline:
+                    timed_out = True
+                    break
+
+                sleep(poll_interval)
+                job = service.get_job(job.job_id)
+
+            if timed_out:
+                job = service.get_job(job.job_id)
+                timed_out = job.status not in TERMINAL_JOB_STATUSES
+
+            aggregated_result = build_aggregated_job_result(job, timed_out=timed_out)
+            return RunCodexTaskResponse.model_validate(
+                aggregated_result.model_dump(mode="python")
+            )
+        except HTTPException as exc:
+            _handle_http_exception(exc)
+        except ToolError:
+            raise
+        except Exception:
+            logger.exception("run_codex_task tool failed")
+            _raise_tool_error("Failed to run Codex task")
+
+    @mcp.tool(
+        name="get_result",
+        description="Return the aggregated result for a job, preferring result.json when available.",
+        structured_output=True,
+    )
+    def get_result(job_id: str) -> GetResultResponse:
+        normalized_job_id = _require_non_empty(job_id, "job_id")
+
+        try:
+            job = service.get_job(normalized_job_id)
+            aggregated_result, result_file_present = load_or_aggregate_result(
+                job,
+                repair_missing_result_file=True,
+            )
+            return GetResultResponse.model_validate(
+                {
+                    **aggregated_result.model_dump(mode="python"),
+                    "result_file_present": result_file_present,
+                }
+            )
+        except HTTPException as exc:
+            _handle_http_exception(exc)
+        except ToolError:
+            raise
+        except Exception:
+            logger.exception("get_result tool failed")
+            _raise_tool_error("Failed to load aggregated result")
+
+    @mcp.tool(
+        name="get_latest_result",
+        description="Return the aggregated result for the latest job by created_at and job_id.",
+        structured_output=True,
+    )
+    def get_latest_result() -> GetLatestResultResponse:
+        try:
+            latest_job = service.get_latest_job()
+            aggregated_result, result_file_present = load_or_aggregate_result(
+                latest_job,
+                repair_missing_result_file=True,
+            )
+            return GetLatestResultResponse.model_validate(
+                {
+                    **aggregated_result.model_dump(mode="python"),
+                    "result_file_present": result_file_present,
+                    "resolved_job_id": latest_job.job_id,
+                }
+            )
+        except HTTPException as exc:
+            _handle_http_exception(exc)
+        except ToolError:
+            raise
+        except Exception:
+            logger.exception("get_latest_result tool failed")
+            _raise_tool_error("Failed to load the latest aggregated result")

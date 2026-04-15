@@ -99,6 +99,16 @@ class JobRepository:
             rows = connection.execute(sql, params).fetchall()
         return [_row_to_job(row) for row in rows]
 
+    def list_all_jobs(self, *, status: JobStatus | None = None) -> list[JobRecord]:
+        sql = "SELECT * FROM jobs"
+        params: list[object] = []
+        if status is not None:
+            sql += " WHERE status = ?"
+            params.append(status.value)
+        with self.database.connection() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [_row_to_job(row) for row in rows]
+
     def claim_next_queued_job(self) -> JobRecord | None:
         started_at = utc_now_iso()
         with self.database.connection() as connection:

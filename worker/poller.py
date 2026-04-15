@@ -5,9 +5,10 @@ import logging
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from time import sleep
+from threading import Event
 
 from bridge_server.config import BridgeSettings
+from bridge_server.results import write_result_file
 from storage import JobRecord, JobRepository, JobStatus
 from worker.codex_runner import run_codex
 
@@ -55,18 +56,18 @@ class JobPoller:
     def __init__(self, settings: BridgeSettings, repository: JobRepository) -> None:
         self.settings = settings
         self.repository = repository
-        self._should_stop = False
+        self._stop_event = Event()
 
     def request_stop(self) -> None:
-        self._should_stop = True
+        self._stop_event.set()
 
     def run_forever(self) -> None:
         self.settings.ensure_runtime_dirs()
         self.repository.database.initialize()
-        while not self._should_stop:
+        while not self._stop_event.is_set():
             processed = self.run_once()
             if not processed:
-                sleep(self.settings.worker_poll_interval_seconds)
+                self._stop_event.wait(self.settings.worker_poll_interval_seconds)
 
     def run_once(self) -> bool:
         job = self.repository.claim_next_queued_job()
@@ -132,6 +133,7 @@ class JobPoller:
                 job=updated_job,
                 duration_seconds=result.duration_seconds,
             )
+            self._write_result_json(updated_job)
             logger.info("completed job %s with status=%s", job.job_id, updated_job.status.value)
         except KeyboardInterrupt:
             logger.warning("job %s interrupted by keyboard interrupt", job.job_id)
@@ -183,7 +185,8 @@ class JobPoller:
             )
         except Exception:
             logger.exception("failed to write metadata for job %s", job.job_id)
-            return
+
+        self._write_result_json(updated_job)
 
         logger.info("completed job %s with status=%s", job.job_id, updated_job.status.value)
 
@@ -216,3 +219,9 @@ class JobPoller:
 
     def _write_text_file(self, path: Path, content: str) -> None:
         path.write_text(content, encoding="utf-8")
+
+    def _write_result_json(self, job: JobRecord) -> None:
+        try:
+            write_result_file(job)
+        except Exception:
+            logger.exception("failed to write result.json for job %s", job.job_id)
