@@ -126,6 +126,11 @@ pip install -r requirements.txt
 - `BRIDGE_MCP_HOST`
 - `BRIDGE_MCP_PORT`
 - `BRIDGE_MCP_PATH`
+- `BRIDGE_MCP_PUBLIC_BASE_URL`
+- `BRIDGE_MCP_AUTH_ENABLED`
+- `BRIDGE_MCP_AUTH_ISSUER_URL`
+- `BRIDGE_MCP_AUTH_AUDIENCE`
+- `BRIDGE_MCP_AUTH_REQUIRED_SCOPES`
 - `BRIDGE_EMBED_WORKER`
 - `BRIDGE_TUNNEL_COMMAND`
 
@@ -137,9 +142,57 @@ pip install -r requirements.txt
 - 允许执行根目录列表（默认只有一个）：`data/demo_workspace/`
 - REST server：`http://127.0.0.1:8000`
 - MCP server：`http://127.0.0.1:8001/mcp`
+- MCP public base URL：默认空；需要公网 OAuth / remote MCP 时手动设置
 - embedded worker：默认关闭；`scripts/dev_up.py` 会默认帮你打开
 
 最小示例见 [.env.example](/Users/meseg/shu/codex/gpt_bridge/.env.example)。
+
+### MCP Auth0 认证配置
+
+当前 MCP server 已支持可选的 **Auth0 OAuth bearer token 校验**。
+
+推荐方案：
+
+1. 在 Auth0 里创建一个 **API**
+   - Identifier 例如：`https://codex-bridge-mcp`
+   - Scope 至少加一个：`mcp:use`
+2. 在 Auth0 里创建一个 **Application**
+   - 给它授权访问上面的 API
+3. 在本地配置 MCP auth 环境变量
+
+最小配置示例：
+
+```dotenv
+BRIDGE_MCP_AUTH_ENABLED=true
+BRIDGE_MCP_AUTH_ISSUER_URL=https://your-tenant.us.auth0.com/
+BRIDGE_MCP_AUTH_AUDIENCE=https://codex-bridge-mcp
+BRIDGE_MCP_AUTH_REQUIRED_SCOPES=mcp:use
+```
+
+如果你的 MCP server 是通过公网地址暴露给 ChatGPT remote MCP app，而不是只在本机 localhost 上访问，还应设置：
+
+```dotenv
+BRIDGE_MCP_PUBLIC_BASE_URL=https://your-public-mcp-domain.example.com
+```
+
+这样 server 会把 OAuth Protected Resource Metadata 里的 resource URL 指向公网地址，而不是本地 `127.0.0.1`。
+
+当前实现方式：
+
+- Auth0 负责签发 access token
+- 你的 MCP server 作为 resource server
+- server 通过 Auth0 的 JWKS 校验 JWT
+- server 会校验：
+  - `iss`
+  - `aud`
+  - `exp`
+  - 必需 scope
+
+当前默认必需 scope 是：
+
+```text
+mcp:use
+```
 
 工作目录约束配置：
 
@@ -164,6 +217,7 @@ BRIDGE_ALLOWED_WORK_ROOTS=["/Users/me/project_a", "/Users/me/project_b"]
 
 版本控制说明：
 
+- `.env` 是本地运行配置文件，默认只保留在本地，不纳入仓库
 - `.venv/`、`artifacts/`、`logs/`、本地 SQLite 数据库，以及 `.DS_Store` 这类本地运行时产物默认不纳入仓库
 - `data/demo_workspace/` 中只保留占位文件和说明文档，执行过程中生成的 smoke / MCP 运行结果不会入库
 - GUI 联调过程中在 `data/demo_workspace/` 下临时创建的 `gui_*` 工作目录也默认只保留在本地，不纳入仓库
@@ -209,6 +263,15 @@ python3.11 scripts/run_worker.py
 再启动 MCP server：
 
 ```bash
+python3.11 scripts/run_mcp_server.py
+```
+
+如果你是直接运行 `scripts/run_mcp_server.py`，而不是通过 `scripts/dev_up.py` 启动，记得先把 `.env` 里的变量加载到当前 shell：
+
+```bash
+set -a
+source .env
+set +a
 python3.11 scripts/run_mcp_server.py
 ```
 

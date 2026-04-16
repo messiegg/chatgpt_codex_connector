@@ -12,6 +12,7 @@ from starlette.responses import JSONResponse
 
 from bridge_server.config import BridgeSettings
 from bridge_server.service import JobService
+from mcp_server.auth import build_mcp_auth_components
 from mcp_server.result_widget import register_result_widget_resource
 from mcp_server.tools import register_tools
 from storage import JobRepository, SQLiteDatabase
@@ -23,8 +24,9 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "Codex Bridge MCP"
 SERVER_INSTRUCTIONS = (
     "This remote MCP server exposes bridge tools for creating jobs, checking job "
-    "state, listing jobs, and reading text artifacts. It is a no-auth local "
-    "development adapter backed by the existing SQLite job system and local worker."
+    "state, listing jobs, and reading text artifacts. It is backed by the existing "
+    "SQLite job system and local worker, and can optionally enforce Auth0-backed "
+    "OAuth bearer token authentication."
 )
 
 
@@ -77,6 +79,7 @@ def create_mcp_server(settings: BridgeSettings | None = None) -> FastMCP:
     resolved_settings = settings or BridgeSettings.from_env()
     service = build_service(resolved_settings)
     service.initialize()
+    auth_settings, token_verifier = build_mcp_auth_components(resolved_settings)
 
     mcp = FastMCP(
         SERVER_NAME,
@@ -84,6 +87,8 @@ def create_mcp_server(settings: BridgeSettings | None = None) -> FastMCP:
         host=resolved_settings.mcp_host,
         port=resolved_settings.mcp_port,
         streamable_http_path=resolved_settings.mcp_path,
+        auth=auth_settings,
+        token_verifier=token_verifier,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=False,
         ),
@@ -100,10 +105,11 @@ def create_mcp_server(settings: BridgeSettings | None = None) -> FastMCP:
         return JSONResponse(service.health().model_dump())
 
     logger.info(
-        "configured MCP server host=%s port=%s path=%s",
+        "configured MCP server host=%s port=%s path=%s auth_enabled=%s",
         resolved_settings.mcp_host,
         resolved_settings.mcp_port,
         resolved_settings.mcp_path,
+        resolved_settings.mcp_auth_enabled,
     )
     return mcp
 

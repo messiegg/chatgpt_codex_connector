@@ -144,6 +144,11 @@ class BridgeSettings:
     mcp_host: str
     mcp_port: int
     mcp_path: str
+    mcp_public_base_url: str | None
+    mcp_auth_enabled: bool
+    mcp_auth_issuer_url: str | None
+    mcp_auth_audience: str | None
+    mcp_auth_required_scopes: tuple[str, ...]
     embed_worker: bool
 
     def __post_init__(self) -> None:
@@ -157,9 +162,22 @@ class BridgeSettings:
         if not is_path_within_allowed_roots(self.default_work_dir, self.allowed_work_roots):
             raise ValueError("default_work_dir is outside the allowed work roots")
 
+        auth_fields = (
+            self.mcp_auth_issuer_url,
+            self.mcp_auth_audience,
+        )
+        if self.mcp_auth_enabled and any(not value for value in auth_fields):
+            raise ValueError("mcp auth is enabled but issuer or audience is missing")
+
     @property
     def allowed_work_root(self) -> Path:
         return self.allowed_work_roots[0]
+
+    @property
+    def mcp_resource_server_url(self) -> str:
+        if self.mcp_public_base_url:
+            return f"{self.mcp_public_base_url.rstrip('/')}{self.mcp_path}"
+        return f"http://{self.mcp_host}:{self.mcp_port}{self.mcp_path}"
 
     @classmethod
     def from_env(cls) -> "BridgeSettings":
@@ -171,6 +189,18 @@ class BridgeSettings:
         )
         if not mcp_path.startswith("/"):
             mcp_path = f"/{mcp_path}"
+
+        raw_scope_value = _env_raw_value(
+            "CODEX_BRIDGE_MCP_AUTH_REQUIRED_SCOPES",
+            "BRIDGE_MCP_AUTH_REQUIRED_SCOPES",
+        )
+        if raw_scope_value is None or raw_scope_value.strip() == "":
+            mcp_auth_required_scopes = ("mcp:use",)
+        else:
+            scope_parts = [part.strip() for part in re.split(r"[\s,]+", raw_scope_value) if part.strip()]
+            if not scope_parts:
+                raise ValueError("mcp auth required scopes must not be empty when configured")
+            mcp_auth_required_scopes = tuple(scope_parts)
 
         return cls(
             database_path=_env_path(
@@ -235,6 +265,24 @@ class BridgeSettings:
                 "BRIDGE_MCP_PORT",
             ),
             mcp_path=mcp_path,
+            mcp_public_base_url=_env_value(
+                "CODEX_BRIDGE_MCP_PUBLIC_BASE_URL",
+                "BRIDGE_MCP_PUBLIC_BASE_URL",
+            ),
+            mcp_auth_enabled=_env_bool(
+                False,
+                "CODEX_BRIDGE_MCP_AUTH_ENABLED",
+                "BRIDGE_MCP_AUTH_ENABLED",
+            ),
+            mcp_auth_issuer_url=_env_value(
+                "CODEX_BRIDGE_MCP_AUTH_ISSUER_URL",
+                "BRIDGE_MCP_AUTH_ISSUER_URL",
+            ),
+            mcp_auth_audience=_env_value(
+                "CODEX_BRIDGE_MCP_AUTH_AUDIENCE",
+                "BRIDGE_MCP_AUTH_AUDIENCE",
+            ),
+            mcp_auth_required_scopes=mcp_auth_required_scopes,
             embed_worker=_env_bool(
                 False,
                 "CODEX_BRIDGE_EMBED_WORKER",
